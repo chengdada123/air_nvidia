@@ -153,8 +153,13 @@ start_simulation() {
     HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
     if [[ "$HTTP_CODE" == "200" || "$HTTP_CODE" == "204" ]]; then
       green "✅ 仿真 $SIM_ID 启动成功"
+
+  #通知到TG 消息    自己填写bot 和通知对象
+
 curl -s -X POST https://api.telegram.org/bot/sendMessage \
- -F chat_id='' -F text=' "✅ 仿真 $SIM_ID 启动 '
+     -F chat_id='' -F text=' "✅ 仿真 $SIM_ID 启动 '
+
+  # 通知完成
       return 0
     else
       yellow "⚠️ 仿真 $SIM_ID 启动失败 (HTTP:$HTTP_CODE)，重试..."
