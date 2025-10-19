@@ -2,27 +2,28 @@
 set -euo pipefail
 
 # ================= 配置 =================
-AIR_USER=""       #注册的邮箱
-AIR_API_TOKEN=""  #在https://air.nvidia.com/settings 获取
-DEFAULT_CMD="sudo ls -la"
+AIR_USER=""  #你的邮箱
+AIR_API_TOKEN="" #https://air.nvidia.com/settings 申请的api
+DEFAULT_CMD="sudo ls -la"  #初始指令
 CPU=1
 MEMORY=1
 DISK=10
 SERVICE_PORTS="22"
 START_ONLY=false
-FORCE_EXEC_PARAM=false
 EXEC_CMD=""
 FORCE_EXEC=false
 RETRY_MAX=5
 SSH_USERNAME="ubuntu"
 SSH_PASS="nvidia"
 SSH_EXEC_PORT=22   # SSH 命令只执行在这个端口
-FORCE_EXEC=false
 USER_SET_CPU=false
 USER_SET_MEM=false
 USER_SET_DISK=false
 USER_SET_SERVICES=false
 RENEW_LOADED=false
+# 可选变量（可在外部 export）
+TG_BOT_TOKEN=""
+TG_CHAT_ID=""
 
 # ================= 输出函数 =================
 green() { echo -e "\033[32m$1\033[0m"; }
@@ -77,7 +78,7 @@ while getopts "c:m:d:s:Se:E:h:r" opt; do
     s) SERVICE_PORTS="$OPTARG"; USER_SET_SERVICES=true ;;
     S) START_ONLY=true ;;
     e) EXEC_CMD="$OPTARG" ;;
-    E) FORCE_EXEC_PARAM=true; EXEC_CMD="$OPTARG" ;;
+    E) FORCE_EXEC=true ;EXEC_CMD="$OPTARG"  ;;
     r) RENEW_LOADED=true ;;
     h) usage; exit 0 ;;
     *) usage; exit 1 ;;
@@ -89,8 +90,15 @@ if [ "$RENEW_LOADED" = true ] && ( $USER_SET_CPU || $USER_SET_MEM || $USER_SET_D
   exit 1
 fi
 
+# 检查 -E 是否单独使用
+if [ "$FORCE_EXEC" = true ] && [ "$START_ONLY" != true ]; then
+    echo "❌ -E 必须和 -S 一起使用"
+    exit 1
+fi
+
+
 if [ "$START_ONLY" = true ] && ( $USER_SET_CPU || $USER_SET_MEM || $USER_SET_DISK || $USER_SET_SERVICES ); then
-  red "❌ -S 模式与 -c/-m/-d/-s 冲突"
+  red "❌ -S 模式与 -c/-m/-d/s 冲突"
   exit 1
 fi
 
@@ -153,14 +161,16 @@ start_simulation() {
     HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
     if [[ "$HTTP_CODE" == "200" || "$HTTP_CODE" == "204" ]]; then
       green "✅ 仿真 $SIM_ID 启动成功"
+    
+#自行配置
+  if [[ -n "$TG_BOT_TOKEN" && -n "$TG_CHAT_ID" ]]; then
+    curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+      -F chat_id="$TG_CHAT_ID" \
+      -F text="✅ 仿真 ${sim_id} 启动成功" >/dev/null
+  fi
 
-  #通知到TG 消息    自己填写bot 和通知对象
+      return 0 
 
-curl -s -X POST https://api.telegram.org/bot/sendMessage \
-     -F chat_id='' -F text= "✅ 仿真 $SIM_ID 启动 "
-
-  # 通知完成
-      return 0
     else
       yellow "⚠️ 仿真 $SIM_ID 启动失败 (HTTP:$HTTP_CODE)，重试..."
       sleep $RETRY_DELAY
@@ -208,6 +218,7 @@ create_node() {
     fi
     green "✅ 节点创建完成: $NODE_ID"
 }
+
 
 
 # ================= 创建网络接口 =================
@@ -300,7 +311,7 @@ wait_for_ssh() {
   local H="$1"
   local P="$2"
   local MAX_WAIT=60
-  local SLEEP_INTERVAL=3
+  local SLEEP_INTERVAL=5
   local waited=0
   yellow "⏳ 等待 SSH 服务 $H:$P 开放..."
   while ! nc -z "$H" "$P"; do
@@ -315,28 +326,42 @@ wait_for_ssh() {
 }
 
 SSH_DONE=()
+
 ssh_exec() {
-  local H="$1"
-  local P="$2"
-  local KEY="$H:$P"
-  if [[ " ${SSH_DONE[*]} " == *" $KEY "* ]]; then
-    return
-  fi
-  local CMD="${EXEC_CMD:-$DEFAULT_CMD}"
-  local ATTEMPT=1
-  while [ $ATTEMPT -le $RETRY_MAX ]; do
-    yellow "🔑 SSH 尝试第 $ATTEMPT 次：$SSH_USERNAME@$H:$P"
-    if nc -z "$H" "$P"; then
-      sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -p "$P" "$SSH_USERNAME@$H" "$CMD" && break
-      yellow "❌ SSH 连接或命令执行失败，重试..."
-    else
-      yellow "⏳ 端口 $H:$P 未开放，等待..."
-    fi
-    ((ATTEMPT++))
-    sleep 3
-  done
-  SSH_DONE+=("$KEY")
-  green "✅ $H:$P 命令执行成功"
+    local H="$1"
+    local P="$2"
+    local KEY="$H:$P"
+
+    # 检查是否已处理过
+    for k in "${SSH_DONE[@]}"; do
+        if [[ "$k" == "$KEY" ]]; then
+            return
+        fi
+    done
+
+    local CMD="${EXEC_CMD:-$DEFAULT_CMD}"
+    local ATTEMPT=1
+
+    while [ $ATTEMPT -le $RETRY_MAX ]; do
+        yellow "🔑 SSH 尝试第 $ATTEMPT 次：$SSH_USERNAME@$H:$P"
+        if nc -z "$H" "$P"; then
+            if sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -p "$P" "$SSH_USERNAME@$H" "$CMD"; then
+                green "✅ $H:$P 命令执行成功"
+                SSH_DONE+=("$KEY")
+                break
+            else
+                yellow "❌ SSH 连接或命令执行失败，重试..."
+            fi
+        else
+            yellow "⏳ 端口 $H:$P 未开放，等待..."
+        fi
+        ((ATTEMPT++))
+        sleep 3
+    done
+
+
+
+  
 }
 
 renew_simulation() {
@@ -365,7 +390,7 @@ renew_simulation() {
             green "✅ 仿真 $SIM_ID 已续期到目标时间: $EXPIRY (剩余 $(($REMAIN_SEC/3600)) 小时)"
             break
         else
-            yellow "⚠️ 仿真 $SIM_ID 当前剩余 $(($REMAIN_SEC/3600)) 小时，未达到目标，继续续期..."
+#            yellow "⚠️ 仿真 $SIM_ID 当前剩余 $(($REMAIN_SEC/3600)) 小时，未达到目标，继续续期..."
             sleep 2
         fi
     done
@@ -396,15 +421,16 @@ fi
 
 
 if [ "$START_ONLY" = true ]; then
-  yellow "🚀 START 模式：遍历启动 STOPPED/STORED 仿真"
-  list_simulations | while IFS=$'\t' read -r SIM_ID TITLE STATE; do
-     FORCE_EXEC=false
+  yellow "🚀 START 模式：遍历启动 NEWD/STORED 仿真"
+
+  while IFS=$'\t' read -r SIM_ID TITLE STATE; do
+    FORCE_EXEC=false
+
     if [[ "$STATE" == "NEW" || "$STATE" == "STORED" ]]; then
       yellow "▶ 启动仿真：$TITLE ($SIM_ID)"
       start_simulation "$SIM_ID"
-      FORCE_EXEC=true
-    elif [[ "$STATE" == "LOADED" && "$FORCE_EXEC_PARAM" == true ]]; then
-      FORCE_EXEC=true
+
+    elif [[ "$STATE" == "LOADED" && ( "$FORCE_EXEC" == true || -n "$EXEC_CMD" ) ]]; then
       green "✅ -E 参数生效，LOADED 仿真也将执行命令"
     else
       yellow "⏩ 仿真 $SIM_ID 状态 $STATE，跳过"
@@ -413,20 +439,25 @@ if [ "$START_ONLY" = true ]; then
 
     if [[ "$FORCE_EXEC" == true || -n "$EXEC_CMD" ]]; then
       green "💻 执行命令：${EXEC_CMD:-$DEFAULT_CMD}"
-      get_nodes "$SIM_ID" | while IFS=$'\t' read -r NODE_ID NODE_NAME; do
-        get_interfaces "$NODE_ID" | while IFS=$'\t' read -r IFACE_ID IFACE_NAME; do
-          get_services "$SIM_ID" | while IFS=$'\t' read -r PORT HOST USER; do
+
+      while IFS=$'\t' read -r NODE_ID NODE_NAME; do
+        while IFS=$'\t' read -r IFACE_ID IFACE_NAME; do
+          while IFS=$'\t' read -r PORT HOST USER; do
             ssh_exec "$HOST" "$PORT" "$USER"
-          done
-        done
-      done
+          done < <(get_services "$SIM_ID")
+        done < <(get_interfaces "$NODE_ID")
+      done < <(get_nodes "$SIM_ID")
     fi
-  done
+  done < <(list_simulations)
+
   exit 0
 fi
+
+
   # 创建流程
+NOW=$(date +%Y%m%d%H%M%S) 
   SIM_ID=$(curl -s -X POST -H "Authorization: Bearer $AIR_TOKEN" -H "Content-Type: application/json" \
-    -d "{\"title\":\"auto-sim\",\"owner\":\"$AIR_USER\",\"netq_auto_enabled\":true}" \
+    -d "{\"title\":\"sim_$NOW\",\"owner\":\"$AIR_USER\",\"netq_auto_enabled\":true}" \
     "https://air.nvidia.com/api/v2/simulations/" | jq -r '.id')
   green "🧩 仿真已创建: $SIM_ID"
   
