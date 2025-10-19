@@ -166,7 +166,7 @@ start_simulation() {
   if [[ -n "$TG_BOT_TOKEN" && -n "$TG_CHAT_ID" ]]; then
     curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
       -F chat_id="$TG_CHAT_ID" \
-      -F text="✅ 仿真 ${sim_id} 启动成功" >/dev/null
+      -F text="✅ 仿真  $SIM_ID 启动成功" >/dev/null
   fi
 
       return 0 
