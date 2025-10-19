@@ -35,7 +35,7 @@ yellow(){ echo -e "\033[33m$1\033[0m"; }
 # ===== 静默安装依赖 =====
 apt_first() {
 yellow "📦 检查必要依赖..."
-sudo apt update -y >/dev/null 2>&1
+sudo apt update  >/dev/null 2>&1
 sudo apt install -y jq curl sshpass netcat-openbsd openssh-client >/dev/null 2>&1
 # 检查安装结果
 for cmd in jq curl sshpass nc ssh; do
