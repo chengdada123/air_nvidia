@@ -366,35 +366,71 @@ ssh_exec() {
 
 renew_simulation() {
     local SIM_ID="$1"
-    local TARGET_SEC=$((6*24*3600 + 23*3600 + 59))  # 目标剩余秒数
+    local TARGET_SEC=$((6*24*3600 + 23*3600 + 59))  # 6天23小时59秒
 
+    # 获取当前状态
+    local INFO=$(curl -s -X GET \
+        -H "accept: application/json" \
+        -H "Authorization: Bearer $AIR_TOKEN" \
+        "https://air.nvidia.com/api/v2/simulations/$SIM_ID/")
+
+    local EXPIRES_AT=$(echo "$INFO" | jq -r '.expires_at')
+    local SLEEP_AT=$(echo "$INFO" | jq -r '.sleep_at')
+
+    if [[ -z "$EXPIRES_AT" || -z "$SLEEP_AT" ]]; then
+        red "❌ 无法获取仿真 $SIM_ID 当前时间状态，响应: $INFO"
+        return 1
+    fi
+
+    local EXPIRES_SEC=$(date -d "$EXPIRES_AT" +%s)
+    local SLEEP_SEC=$(date -d "$SLEEP_AT" +%s)
+
+    # 计算目标 sleep_at（不能超过 expires_at）
+    local NOW_SEC=$(date -u +%s)
+    local TARGET_SLEEP_SEC=$(( NOW_SEC + TARGET_SEC ))
+    if [[ $TARGET_SLEEP_SEC -gt $EXPIRES_SEC ]]; then
+        TARGET_SLEEP_SEC=$EXPIRES_SEC
+        yellow "⚠️ 过期时间是($(date -d @$EXPIRES_SEC -u '+%F %T'))"
+    fi
+
+    # 如果 sleep_at 已经 >= expires_at，则无法再续期
+    if [[ $SLEEP_SEC -ge $EXPIRES_SEC ]]; then
+        green "✅ 仿真 $SIM_ID 已达最大续期限制"
+        return 0
+    fi
+
+    # 开始多次续期
     while true; do
+        NOW_SEC=$(date -u +%s)
+        SLEEP_SEC=$(date -d "$SLEEP_AT" +%s)
+        REMAIN_HOURS=$(( (SLEEP_SEC - NOW_SEC) / 3600 ))
+
+        # 达到目标或触顶就结束
+        if [[ $SLEEP_SEC -ge $TARGET_SLEEP_SEC || $SLEEP_SEC -ge $EXPIRES_SEC ]]; then
+            green "✅ 仿真 $SIM_ID 已续期到 $(date -d @$SLEEP_SEC -u '+%F %T') (剩余 $REMAIN_HOURS 小时)"
+            break
+        fi
+
+        # 执行 extend
         RESPONSE=$(curl -s -X POST \
             -H "Authorization: Bearer $AIR_TOKEN" \
             -H "Content-Type: application/json" \
             -d '{"action":"extend"}' \
             "https://air.nvidia.com/api/v1/simulation/$SIM_ID/control/")
 
-        # 解析到期时间
-        EXPIRY=$(echo "$RESPONSE" | jq -r '.message')
-        if [[ -z "$EXPIRY" || "$EXPIRY" == "null" ]]; then
+        if [[ "$(echo "$RESPONSE" | jq -r '.result')" != "success" ]]; then
             red "❌ 仿真 $SIM_ID 续期失败，响应: $RESPONSE"
             return 1
         fi
 
-        # 当前 UTC 时间
-        NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-        REMAIN_SEC=$(( $(date -d "$EXPIRY" +%s) - $(date -d "$NOW" +%s) ))
+        # 更新 sleep_at（POST extend 返回的是字符串）
+        SLEEP_AT=$(echo "$RESPONSE" | jq -r '.message')
 
-        if [[ $REMAIN_SEC -ge $TARGET_SEC ]]; then
-            green "✅ 仿真 $SIM_ID 已续期到目标时间: $EXPIRY (剩余 $(($REMAIN_SEC/3600)) 小时)"
-            break
-        else
-#            yellow "⚠️ 仿真 $SIM_ID 当前剩余 $(($REMAIN_SEC/3600)) 小时，未达到目标，继续续期..."
-            sleep 2
-        fi
+        yellow "⏩ 仿真 $SIM_ID 已续期到 $(date -d @$(( $(date -d "$SLEEP_AT" +%s) )) -u '+%F %T') (剩余 $(( ( $(date -d "$SLEEP_AT" +%s) - NOW_SEC ) / 3600 )) 小时)"
+        sleep 2
     done
 }
+
 
 
 
